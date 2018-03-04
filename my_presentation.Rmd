@@ -1,0 +1,291 @@
+---
+title: "Brown Datathon 2018 - RI Electricity"
+author: "Thoa Ta"
+date: "March 3, 2018"
+output: html_notebook
+---
+
+```{r setup}
+# include the necessary libraries
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(scales)
+
+# set all the plots in this document to white background
+theme_set(theme_bw())
+```
+
+```{r set-path, include=FALSE}
+path <- "C:/Users/Thoa Ta/Downloads/brown_datathon_2018/"
+setwd(path)
+```
+
+```{r staging}
+# load & check data
+mydata <- read_csv("my_copy_of_2017_smd_hourly.csv")
+mydata <- mydata %>% select(-13,-14)
+head(mydata)
+summary(mydata)
+
+# check missing data: all zero sums means no missing data
+colSums(is.na(mydata))
+
+# check correlation
+cor(mydata[,3:12])
+```
+
+We see that the following pairs have the highest correlations:
+
+Variable A | Variable B | Correlation
+--- | --- | ---
+RT_Demand | DA_Demand | .97
+DA_EC | DA_LMP | .99
+RT_EC | RT_LMP | .99
+
+Since I don't have background in the electricity market, variables other than the Real-Time Demand and the Day-Ahead Demand make little sense to me. Hence, I chose to work on the Demand variables only.
+
+## Electricity demand by month
+
+```{r group-by-month}
+# parse the Date column
+mydata$Date <- dmy(mydata$Date)
+head(mydata)
+
+mydata %>% 
+  mutate(Month = as.factor(month(Date))) %>%
+  group_by(Month) %>%
+  summarize("Real-Time Demand" = mean(RT_Demand),
+            "Day-Ahead Demand" = mean(DA_Demand)) %>%
+  gather(2:3, key = Type, value = Mean_Demand) %>%
+  ggplot(aes(x = Month, y = Mean_Demand, color = Type)) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("green", "blue")) +
+  labs(title = "Average Electricity Demand by Month in 2017", y = "Average Demand")
+```
+This plot shows us two things:
+    
+  1. How close the average day-ahead and real-time demand are in some months, and
+  2. The demands in different months throughout a year.
+
+We will further examine these two observations below. 
+  
+### 1. Variance in demand and day-ahead / real-time correlation
+
+I wonder if the variance in monthly demand could be indicative of the day-ahead / real-time correlation. In other words, can we say that day-ahead and real-time values are less correlated in months with higer variance?
+
+```{r month-variance}
+mydata %>%
+  mutate(Month = as.factor(month(Date))) %>%
+  group_by(Month) %>%
+  summarize("Real-Time Demand" = mean(RT_Demand),
+            "Day-Ahead Demand" = mean(DA_Demand),
+            "Real-Time Std.Err" = sd(RT_Demand) / sqrt(n()),
+            "Day-Ahead Std.Err" = sd(DA_Demand) / sqrt(n())) %>%
+  gather(2:3, key = Demand_Type, value = Mean_Value) %>%
+  gather(2:3, key = Std.Err_Type, value = Std.Err_Value) %>%
+  arrange(Month) %>%
+  filter((Demand_Type == "Real-Time Demand" & Std.Err_Type == "Real-Time Std.Err") |
+           (Demand_Type == "Day-Ahead Demand" & Std.Err_Type == "Day-Ahead Std.Err")) %>%
+  ggplot(aes(x = Month, y = Mean_Value, color = Demand_Type)) +
+  geom_pointrange(aes(ymin = Mean_Value - Std.Err_Value, ymax = Mean_Value + Std.Err_Value)) +
+  scale_color_manual(values = c("green", "blue")) +
+  labs(title = "Average Electricity Demand by Month in 2017", 
+       subtitle = "With standard errors", 
+       y = "Average Demand", 
+       color = "Type")
+```
+
+It seems like the relationship is not that strong.
+
+### 2. Demand trend throughout the year
+
+We see that electricity demand is the highest in July and August; relatively high in December, January, February, March, June, and September; and lowest in April, May, October, and November. Possible explanations are as follows:
+
+- July and August are the peak of summer, so electricity for running the air-conditioner is high.
+
+- April-May and October-November are the transition months from a cold season to a hot one (and vice versa), so users might simply turn off the heater and not (yet to / need to) turn on the air-conditioner. Therefore, electricity demand is low.
+
+- June and September are the pre and post of summer time, so electricity demand is slightly, but not drastically, higher than usual.
+
+- The other months show the average electricity need for heaters during winter time. 
+
+**One interesting point for future research** would be: consider what types of appliances are used by the majority of users *(probably both industrial and residential users?)* in the summer and the winter seasons, to verify the demand for electricity.
+
+## Electricity demand by time of day
+
+Next up, I want to examine the demand trend throughout the course of a day, faceted by month.
+
+*Note* Since there is not a lot of difference between the Real-Time and Day-Ahead Demand, I will just use the Real-Time Demand for the following analysis.
+
+```{r, group-by-time-month-together}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  #filter(Month %in% c("12", "1", "2", "3")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  labs(title = "Average Electricity Demand in 2017", 
+       subtitle = "Months together", 
+       y = "Average Real-Time Demand")
+```
+
+To see the trend in each month more clearly, I am going to facet the data into month windows.
+
+```{r, group-by-time-month-separated}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  #filter(Month %in% c("12", "1", "2", "3")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  facet_wrap( ~ Month) +
+  theme(legend.position = 'none') +
+  labs(title = "Average Electricity Demand in 2017", 
+       subtitle = "12 windows represent 12 months",
+       y = "Average Real-Time Demand")
+```
+
+From the two plots above, we observe that :
+
+  1. The timewise trends group themselves into five (5) groups of pattern:
+      a. December to March
+      b. April and May
+      c. June and September
+      d. July and August
+      e. October and November
+  
+  2. All 5 groups have similar lowest points of demand (the 3-5am range), but their peak patterns differ. 
+  
+Below, we will look more closely at each group to examine their peak pattern.
+
+### December to March
+```{r dec-to-march}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  filter(Month %in% c("12", "1", "2", "3")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  scale_color_manual(values = c("#F8766D", "#DE8C00", "#B79F00", "#FF65B0")) +
+  scale_fill_manual(values = c("#F8766D", "#DE8C00", "#B79F00", "#FF65B0")) +
+  labs(title = "Average Electricity Demand in 2017 Months: 1,2,3,12",
+       y = "Average Real-Time Demand")
+```
+
+### April and May
+```{r apr-and-may}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  filter(Month %in% c("4", "5")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  scale_color_manual(values = c("#7CAE00", "#00BA38")) +
+  scale_fill_manual(values = c("#7CAE00", "#00BA38")) +
+  labs(title = "Average Electricity Demand in 2017 Months: 4,5",
+       y = "Average Real-Time Demand")
+```
+
+### June and September
+```{r jun-and-sep}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  filter(Month %in% c("6", "9")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  scale_color_manual(values = c("#00C08B", "#619CFF")) +
+  scale_fill_manual(values = c("#00C08B", "#619CFF")) +
+  labs(title = "Average Electricity Demand in 2017 Months: 6,9",
+       y = "Average Real-Time Demand")
+```
+
+### July and August
+```{r jul-and-aug}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  filter(Month %in% c("7", "8")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  scale_color_manual(values = c("#00BFC4", "#00B4F0")) +
+  scale_fill_manual(values = c("#00BFC4", "#00B4F0")) +
+  labs(title = "Average Electricity Demand in 2017 Months: 7,8",
+       y = "Average Real-Time Demand")
+```
+
+### October and Novemeber
+```{r oct-and-nov}
+mydata %>% 
+  mutate(Month = as.factor(month(Date)), Hour = as.numeric(Hr_End)) %>%
+  select(-Hr_End) %>%
+  filter(Month %in% c("10", "11")) %>%
+  group_by(Month, Hour) %>%
+  summarize(Mean_RT_Demand = mean(RT_Demand),
+            Se_RT_Demand = sd(RT_Demand) / sqrt(n())) %>%
+  ggplot(aes(x = Hour)) +
+  geom_line(aes(y = Mean_RT_Demand, color = Month)) +
+  geom_ribbon(aes(ymin = Mean_RT_Demand - Se_RT_Demand, 
+                  ymax = Mean_RT_Demand + Se_RT_Demand, 
+                  fill = Month), 
+              alpha = 0.25) +
+  scale_x_continuous(breaks = seq(0, 24, by = 6)) +
+  scale_color_manual(values = c("#C77CFF", "#F564E3")) +
+  scale_fill_manual(values = c("#C77CFF", "#F564E3")) +
+  labs(title = "Average Electricity Demand in 2017 Months: 10,11",       
+       y = "Average Real-Time Demand")
+```
+
+
+## Next steps:
+
+1. **Shift the color wheel** to make blue shades align with cold months and red shades align with hot months.
